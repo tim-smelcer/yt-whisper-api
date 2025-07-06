@@ -1,51 +1,59 @@
 from flask import Flask, request, jsonify
-import subprocess
+import yt_dlp
+import whisper
 import os
-import requests
 import uuid
 
 app = Flask(__name__)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+@app.route('/')
+def index():
+    return jsonify({"message": "Whisper API is live"}), 200
 
-def download_audio(video_id):
-    filename = f"{uuid.uuid4()}.mp3"
-    command = [
-        "yt-dlp",
-        "-x",
-        "--audio-format", "mp3",
-        "-o", filename,
-        f"https://www.youtube.com/watch?v={video_id}"
-    ]
-    subprocess.run(command, check=True)
-    return filename
-
-def transcribe_with_whisper(file_path):
-    with open(file_path, "rb") as f:
-        response = requests.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            files={"file": f},
-            data={"model": "whisper-1"}
-        )
-    return response.json().get("text", "")
-
-@app.route("/transcribe")
+@app.route('/transcribe', methods=['POST'])
 def transcribe():
-    video_id = request.args.get("v")
-    if not video_id:
-        return jsonify({"error": "Missing video ID"}), 400
+    data = request.get_json()
+    url = data.get("url")
+
+    if not url:
+        return jsonify({"error": "Missing 'url' in request body"}), 400
+
+    # Create unique filename
+    temp_filename = f"temp_{uuid.uuid4()}.mp3"
+
     try:
-        filename = download_audio(video_id)
-        transcript = transcribe_with_whisper(filename)
-        os.remove(filename)
-        return jsonify({"transcript": transcript})
+        # Download audio using yt-dlp
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': temp_filename,
+            'quiet': True,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Load whisper model and transcribe
+        model = whisper.load_model("base")  # You can use "tiny", "small", "medium", etc.
+        result = model.transcribe(temp_filename)
+
+        # Clean up temp file
+        os.remove(temp_filename)
+
+        return jsonify({"transcript": result["text"]})
+
     except Exception as e:
+        # Clean up if error
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     import os
-port = int(os.environ.get("PORT", 5000))
-app.run(host='0.0.0.0', port=port)
-
-
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
